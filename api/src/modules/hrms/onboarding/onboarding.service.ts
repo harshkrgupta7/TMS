@@ -628,6 +628,24 @@ export class OnboardingService {
         return [];
       }
 
+      const requestIds = rows.map((r) => r.id);
+      const userIds = rows.map((r) => r.userId).filter(Boolean) as number[];
+
+      // Only the Passport Size Photo document per request (no full doc list)
+      const [docPhotos, oauthAvatars] = await Promise.all([
+        this.db
+          .select({ onboardingId: onboardingDocuments.onboardingId, fileUrl: onboardingDocuments.fileUrl })
+          .from(onboardingDocuments)
+          .where(and(
+            inArray(onboardingDocuments.onboardingId, requestIds),
+            eq(onboardingDocuments.docType, 'Passport Size Photo')
+          )),
+        // Only avatar per oauth account (no token/raw payload)
+        userIds.length > 0
+          ? this.db.select({ userId: oauthAccounts.userId, avatar: oauthAccounts.avatar }).from(oauthAccounts).where(inArray(oauthAccounts.userId, userIds))
+          : Promise.resolve([] as { userId: number; avatar: string | null }[]),
+      ]);
+
       const result = rows.map((row) => {
         const statuses = [
           row.profileStatus,
@@ -640,10 +658,15 @@ export class OnboardingService {
         const employeeProgress = Math.round((submittedCount / statuses.length) * 100);
         const progress = row.progress === 'pending' || !row.progress ? 0 : Number(row.progress) || 0;
 
+        const oauthPhoto = oauthAvatars.find((o) => o.userId === row.userId)?.avatar ?? null;
+        const docPhoto = docPhotos.find((d) => d.onboardingId === row.id)?.fileUrl ?? null;
+        const profilePhoto = docPhoto || oauthPhoto || null;
+
         return {
           ...row,
           progress,
           employeeProgress,
+          profilePhoto,
         };
       });
 
