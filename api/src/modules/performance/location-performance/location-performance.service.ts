@@ -1,5 +1,5 @@
 import { Injectable, Inject } from "@nestjs/common";
-import { and, between, eq, exists, inArray, or, sql } from "drizzle-orm";
+import { and, between, eq, exists, inArray, or, sql, type SQL } from "drizzle-orm";
 import { format } from "date-fns";
 import { WINSTON_MODULE_PROVIDER } from "nest-winston";
 import { Logger } from "winston";
@@ -82,18 +82,26 @@ export class LocationPerformanceService {
         this.logger.info("Fetching location performance", { query });
 
         try {
-            const range = yearToDateRange(query.year!);
+            let range: { fromDate: string; toDate: string };
+            if (query.fromDate && query.toDate) {
+                range = { fromDate: query.fromDate, toDate: query.toDate };
+            } else {
+                range = yearToDateRange(query.year!);
+            }
+
             const filters: LocationFilters = {
                 ...query,
                 fromDate: range.fromDate,
                 toDate: range.toDate,
             };
 
+            const locationIds = await this.getLocationIdsForFilters(filters);
+
             const [tenderRows, assignedRows, itemRows, tenderListRows] = await Promise.all([
-                this.getTenders(filters),
-                this.getAssignedTenders(filters),
+                this.getTenders(filters, locationIds),
+                this.getAssignedTenders(filters, locationIds),
                 filters.heading ? this.getItemsUnderHeading(filters.heading) : Promise.resolve([]),
-                this.getTenderList(filters),
+                this.getTenderList(filters, locationIds),
             ]);
 
             const assignedApproved = this.buildAssignedApprovedSummary(assignedRows);
@@ -120,15 +128,41 @@ export class LocationPerformanceService {
         }
     }
 
+    // ─── Location ID resolution from state / region / location ────────────
+
+    private async getLocationIdsForFilters(filters: LocationFilters): Promise<number[] | null> {
+        // If only a specific location is given (no state/region), use it directly
+        if (filters.location && !filters.state && !filters.region) {
+            return [filters.location];
+        }
+
+        // If no state/region/location at all, return null (no location filter)
+        if (!filters.state && !filters.region && !filters.location) {
+            return null;
+        }
+
+        // Resolve state/region → location IDs
+        const conditions = [eq(locations.status, true)];
+        if (filters.state) conditions.push(eq(locations.state, filters.state));
+        if (filters.region) conditions.push(eq(locations.region, filters.region));
+
+        const rows = await this.db.select({ id: locations.id }).from(locations).where(and(...conditions));
+        return rows.map(r => r.id);
+    }
+
+    private buildLocationCondition(locationIds: number[] | null): SQL | undefined {
+        if (locationIds === null) return undefined; // no filter
+        if (locationIds.length === 0) return sql`false`; // no matching locations → return nothing
+        return inArray(tenderInfos.location, locationIds);
+    }
+
     // ─── Query 1: bid submissions ─────────────────────────────────────
 
-    private async getTenders(filters: LocationFilters): Promise<TenderRow[]> {
+    private async getTenders(filters: LocationFilters, locationIds: number[] | null): Promise<TenderRow[]> {
         const conditions = [eq(tenderInfos.deleteStatus, 0)];
 
-        const locationConditions: ReturnType<typeof eq>[] = [];
-        if (filters.location) locationConditions.push(eq(locations.id, filters.location));
-        if (locationConditions.length === 1) conditions.push(locationConditions[0]);
-        if (locationConditions.length === 2) conditions.push(or(...locationConditions)!);
+        const locationCondition = this.buildLocationCondition(locationIds);
+        if (locationCondition) conditions.push(locationCondition);
 
         if (filters.team) conditions.push(eq(tenderInfos.team, filters.team));
         if (filters.heading) conditions.push(eq(itemHeadings.id, filters.heading));
@@ -165,13 +199,11 @@ export class LocationPerformanceService {
 
     // ─── Query 2: assigned / approved ────────────────────────────────
 
-    private async getAssignedTenders(filters: LocationFilters): Promise<AssignedTenderRow[]> {
+    private async getAssignedTenders(filters: LocationFilters, locationIds: number[] | null): Promise<AssignedTenderRow[]> {
         const conditions = [eq(tenderInfos.deleteStatus, 0)];
 
-        const locationConditions: ReturnType<typeof eq>[] = [];
-        if (filters.location) locationConditions.push(eq(locations.id, filters.location));
-        if (locationConditions.length === 1) conditions.push(locationConditions[0]);
-        if (locationConditions.length === 2) conditions.push(or(...locationConditions)!);
+        const locationCondition = this.buildLocationCondition(locationIds);
+        if (locationCondition) conditions.push(locationCondition);
 
         if (filters.team) conditions.push(eq(tenderInfos.team, filters.team));
         if (filters.heading) conditions.push(eq(itemHeadings.id, filters.heading));
@@ -258,14 +290,17 @@ export class LocationPerformanceService {
 
     // ─── Query 4: flat tender list (for category tables) ─────────────
 
-    private async getTenderList(filters: LocationFilters): Promise<BusinessTenderRow[]> {
+    private async getTenderList(filters: LocationFilters, locationIds: number[] | null): Promise<BusinessTenderRow[]> {
         const from = new Date(filters.fromDate);
         const to = new Date(filters.toDate);
         to.setHours(23, 59, 59, 999);
 
         const conditions = [eq(tenderInfos.deleteStatus, 0), between(tenderInfos.dueDate, from, to)];
         if (filters.heading) conditions.push(eq(itemHeadings.id, filters.heading));
-        if (filters.location) conditions.push(eq(locations.id, filters.location));
+
+        const locationCondition = this.buildLocationCondition(locationIds);
+        if (locationCondition) conditions.push(locationCondition);
+
         if (filters.team) conditions.push(eq(tenderInfos.team, filters.team));
 
         return (await this.db

@@ -13,7 +13,8 @@ export interface LocationPerformanceQuery {
 
 export interface LocationPerformanceParams {
     headingId?: number;
-    location?: number;
+    state?: string;
+    region?: string;
     team?: number;
     fromDate: string;
     toDate: string;

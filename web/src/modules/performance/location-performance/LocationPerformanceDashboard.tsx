@@ -11,7 +11,7 @@ import { Filter, Download, Calendar as CalendarIcon } from "lucide-react";
 
 /* Custom Hooks */
 import { useLocationPerformance, useItemHeadings, type LocationPerformanceParams } from "@/hooks/api/useLocationPerformance";
-import { useLocationsTrue } from "@/hooks/api/useLocations";
+import { useStates, useRegions } from "@/hooks/api/useLocations";
 import { useTeams } from "@/hooks/api/useTeams";
 import { Combobox } from "@/components/form/SelectField";
 
@@ -27,7 +27,8 @@ const LOCATION_PERFORMANCE_STORAGE_KEY = "location-performance-filters";
 
 type LocationPerformanceFilters = {
     selectedHeadingId: number;
-    selectedLocation: number | null;
+    selectedState: string | null;
+    selectedRegion: string | null;
     selectedTeam: number;
     fromDate: string;
     toDate: string;
@@ -41,15 +42,9 @@ const parseNumber = (value: string | null, fallback: number): number => {
     return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const parseOptionalNumber = (value: unknown): number | null => {
-    if (value === null || value === undefined || value === "") return null;
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-};
-
 const getInitialFilters = (search: string): LocationPerformanceFilters => {
     const urlParams = new URLSearchParams(search);
-    const hasUrlFilters = ["item", "location", "team", "fromDate", "toDate", "year"].some(key => urlParams.has(key));
+    const hasUrlFilters = ["item", "state", "region", "team", "fromDate", "toDate", "year"].some(key => urlParams.has(key));
     const source = hasUrlFilters ? urlParams : new URLSearchParams(localStorage.getItem(LOCATION_PERFORMANCE_STORAGE_KEY) ?? "");
 
     let fromDate = source.get("fromDate") ?? "";
@@ -68,7 +63,8 @@ const getInitialFilters = (search: string): LocationPerformanceFilters => {
 
     return {
         selectedHeadingId: parseNumber(source.get("item"), 0),
-        selectedLocation: parseOptionalNumber(source.get("location")),
+        selectedState: source.get("state") || null,
+        selectedRegion: source.get("region") || null,
         selectedTeam: parseNumber(source.get("team"), 0),
         fromDate: validRange ? fromDate : "",
         toDate: validRange ? toDate : "",
@@ -76,14 +72,27 @@ const getInitialFilters = (search: string): LocationPerformanceFilters => {
 };
 
 const toAppliedParams = (filters: LocationPerformanceFilters): LocationPerformanceParams | null => {
-    if (filters.selectedLocation === null || !filters.fromDate || !filters.toDate) return null;
+    // Require state, plus dates
+    if (!filters.selectedState || !filters.fromDate || !filters.toDate) return null;
     return {
         headingId: filters.selectedHeadingId > 0 ? filters.selectedHeadingId : undefined,
-        location: filters.selectedLocation,
+        state: filters.selectedState,
+        region: filters.selectedRegion ?? undefined,
         team: filters.selectedTeam > 0 ? filters.selectedTeam : undefined,
         fromDate: filters.fromDate,
         toDate: filters.toDate,
     };
+};
+
+const buildSearchFromParams = (params: LocationPerformanceParams): URLSearchParams => {
+    const search = new URLSearchParams();
+    if (params.headingId) search.set("item", String(params.headingId));
+    if (params.state) search.set("state", params.state);
+    if (params.region) search.set("region", params.region);
+    if (params.team) search.set("team", String(params.team));
+    search.set("fromDate", params.fromDate);
+    search.set("toDate", params.toDate);
+    return search;
 };
 
 const getGpColor = (gp: number | null | undefined): string => {
@@ -146,7 +155,8 @@ export default function LocationPerformanceDashboard() {
 
     // Filter States (initialized from URL params for shareable/bookmarkable links)
     const [selectedHeadingId, setSelectedHeadingId] = useState(initialFilters.selectedHeadingId);
-    const [selectedLocation, setSelectedLocation] = useState<number | null>(initialFilters.selectedLocation);
+    const [selectedState, setSelectedState] = useState<string | null>(initialFilters.selectedState);
+    const [selectedRegion, setSelectedRegion] = useState<string | null>(initialFilters.selectedRegion);
     const [selectedTeam, setSelectedTeam] = useState(initialFilters.selectedTeam);
     const [fromDate, setFromDate] = useState(initialFilters.fromDate);
     const [toDate, setToDate] = useState(initialFilters.toDate);
@@ -154,50 +164,51 @@ export default function LocationPerformanceDashboard() {
 
     useEffect(() => {
         if (location.search || !appliedParams) return;
-        const search = new URLSearchParams();
-        if (appliedParams.headingId) search.set("item", String(appliedParams.headingId));
-        search.set("location", String(appliedParams.location));
-        if (appliedParams.team) search.set("team", String(appliedParams.team));
-        search.set("fromDate", appliedParams.fromDate);
-        search.set("toDate", appliedParams.toDate);
+        const search = buildSearchFromParams(appliedParams);
         navigate({ search: `?${search.toString()}` }, { replace: true });
     }, [appliedParams, location.search, navigate]);
 
-    // Fetch headings for dropdown
+    // Fetch filter dropdown data
     const { data: headings = [] } = useItemHeadings();
+    const { data: states = [] } = useStates();
+    const { data: regions = [] } = useRegions(selectedState ?? undefined);
+    const { data: teams = [] } = useTeams();
 
     // Fetch location performance data
     const { data, isLoading: dataLoading } = useLocationPerformance(appliedParams);
-
-    const { data: locations = [] } = useLocationsTrue();
-
-    const { data: teams = [] } = useTeams();
 
     const dateError = fromDate && toDate && fromDate > toDate ? "From Date must be on or before To Date" : null;
 
     // Build params for submission
     const params = useMemo<LocationPerformanceParams | null>(() => {
-        if (!selectedLocation || !fromDate || !toDate || dateError) return null;
+        if (!selectedState || !fromDate || !toDate || dateError) return null;
         return {
             headingId: selectedHeadingId > 0 ? selectedHeadingId : undefined,
-            location: selectedLocation,
+            state: selectedState,
+            region: selectedRegion ?? undefined,
             team: selectedTeam > 0 ? selectedTeam : undefined,
             fromDate,
             toDate,
         };
-    }, [dateError, fromDate, selectedHeadingId, selectedLocation, selectedTeam, toDate]);
+    }, [dateError, fromDate, toDate, selectedHeadingId, selectedState, selectedRegion, selectedTeam]);
+
+    // Handle State change — clear dependent Region
+    const handleStateChange = (value: string | null) => {
+        setSelectedState(value);
+        setSelectedRegion(null);
+    };
+
+    // Handle Region change
+    const handleRegionChange = (value: string | null) => {
+        setSelectedRegion(value);
+    };
 
     // Handle form submission
     const handleSubmit = () => {
         if (!params) return;
         setAppliedParams(params);
 
-        const search = new URLSearchParams();
-        if (params.headingId) search.set("item", String(params.headingId));
-        search.set("location", String(params.location));
-        if (params.team) search.set("team", String(params.team));
-        search.set("fromDate", params.fromDate);
-        search.set("toDate", params.toDate);
+        const search = buildSearchFromParams(params);
 
         try {
             localStorage.setItem(LOCATION_PERFORMANCE_STORAGE_KEY, search.toString());
@@ -258,7 +269,7 @@ export default function LocationPerformanceDashboard() {
                 <div className="flex flex-col md:flex-row gap-6 justify-between items-start md:items-center">
                     <div>
                         <h1 className="text-3xl font-bold tracking-tight">Location Performance</h1>
-                        <p className="text-muted-foreground mt-1">Analyze location performance metrics by item heading, state, team and date range.</p>
+                        <p className="text-muted-foreground mt-1">Analyze location performance metrics by state, region, item heading, team and date range.</p>
                     </div>
                     <div className="flex items-center gap-2">
                         <Button variant="outline" onClick={handleExportReport} disabled={!appliedParams || !data}>
@@ -270,18 +281,32 @@ export default function LocationPerformanceDashboard() {
                 {/* ===== FILTER CARD ===== */}
                 <Card className="shadow-sm">
                     <CardContent className="p-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 w-full gap-4 items-end">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 w-full gap-4 items-end">
                             {/* State */}
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">State</label>
                                 <Combobox
-                                    value={selectedLocation !== null ? String(selectedLocation) : ""}
-                                    onChange={v => setSelectedLocation(v ? Number(v) : null)}
-                                    options={locations.map(location => ({
-                                        id: location.id.toString(),
-                                        name: location.name.toLowerCase().replace(/\b\w/g, char => char.toUpperCase()),
+                                    value={selectedState ?? ""}
+                                    onChange={handleStateChange}
+                                    options={states.map(state => ({
+                                        id: state,
+                                        name: state.charAt(0).toUpperCase() + state.slice(1).toLowerCase(),
                                     }))}
-                                    placeholder="Please Select Location"
+                                    placeholder="Select State"
+                                />
+                            </div>
+
+                            {/* Region */}
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Region</label>
+                                <Combobox
+                                    value={selectedRegion ?? ""}
+                                    onChange={handleRegionChange}
+                                    options={regions.map(region => ({
+                                        id: region,
+                                        name: region.charAt(0).toUpperCase() + region.slice(1).toLowerCase(),
+                                    }))}
+                                    placeholder="Select Region"
                                 />
                             </div>
 
